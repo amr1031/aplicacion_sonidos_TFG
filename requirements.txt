@@ -1,1 +1,12 @@
-
+streamlit
+numpy
+pandas
+matplotlib
+tensorflow
+librosa
+scikit-learn
+joblib
+fpdf
+soundfile
+streamlit-webrtc
+sounddevice
