@@ -184,11 +184,6 @@ st.subheader('Resumen basado en probabilidades')
 st.table(df_prob)
 st.markdown("---")
 
-# --- 4) Índice de severidad ---
-st.subheader("Índice de severidad")
-severity = sum(max(r['Crackles'], r['Wheezes'], r['Both'])*window_sec for r in results)
-st.write(f"Severity score: {round(severity,3)}")
-
 # ─── 7) Clasificación en 3-Grupos (Sano / Infecciosa / Obstructiva) ─────────
 st.markdown("---")
 st.subheader("Clasificación 3-Grupos (Sano / Infecciosa / Obstructiva)")
