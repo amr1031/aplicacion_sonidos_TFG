@@ -2,10 +2,6 @@
 # coding: utf-8
 
 # In[1]:
-
-
-import os
-import glob
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
@@ -19,95 +15,61 @@ from fpdf import FPDF
 from datetime import datetime
 import sqlite3
 import json
+import sounddevice as sd
 import os
-import streamlit as st
 
-# Solo en local intentamos importar sounddevice
-if os.getenv("STREAMLIT_SERVER", "") == "":
-    try:
-        import sounddevice as sd
-    except OSError:
-        sd = None
-else:
-    sd = None  # en Cloud sd no estará disponible
-
-
-# Importamos la función de inferencia que usa tu RandomForest
-
-from inference import predict_group3_from_audio
-
-# Mapeo diagnóstico → gran familia
-GROUP_MAP = {
-    'Asthma':         'Obstructiva',
-    'COPD':           'Obstructiva',
-    'Bronchiectasis': 'Obstructiva',
-    # … otros obstructivos …
-    'URTI':           'Infecciosa',
-    'Pneumonia':      'Infecciosa',
-    'Bronchiolitis':  'Infecciosa',
-    # … otros infecciosos …
-    'Healthy':        'Sano'
-}
-
-# ─── AQUÍ LA FUNCIÓN QUE FALTABA ───
+# --- Utilidad para convertir segmento a WAV bytes ---
 def audio_segment_to_wav_bytes(segment: np.ndarray, sr: int) -> bytes:
-    """
-    Convierte un array float32 [-1,1] en bytes WAV (PCM int16).
-    """
-    # Clip & escalado a int16
     int16 = np.int16(np.clip(segment, -1, 1) * 32767)
     buf = BytesIO()
     with wave.open(buf, 'wb') as wf:
-        wf.setnchannels(1)       # mono
-        wf.setsampwidth(2)       # 2 bytes = 16 bits
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
         wf.setframerate(sr)
         wf.writeframes(int16.tobytes())
     return buf.getvalue()
 
-# ─── CONSTANTES ───
-AUDIO_DIR = '../input/Respiratory_Sound_Database/Respiratory_Sound_Database/audio_and_txt_files/'
-
+# --- Carga del modelo con caché ---
 @st.cache_resource
 def load_cnn_model():
     return load_model('models/cnn_model.h5')
 model = load_cnn_model()
 class_names = ['None', 'Crackles', 'Wheezes', 'Both']
 
-st.title("Detección de Wheezes, Crackles y Enfermedad Respiratoria")
+st.title("Detección de Wheezes y Crackles")
+# Mostrar versión del modelo
+model_path = 'models/cnn_model.h5'
+mod_time = datetime.fromtimestamp(os.path.getmtime(model_path)).strftime('%Y-%m-%d %H:%M:%S')
+st.text(f"Modelo: {model_path} (modificado: {mod_time})")
 
-
-# ─── 1) Carga Audio ───
+# --- Selección de fuente ---
 source = st.radio("Fuente de entrada:", ["Subir archivo", "Grabar micrófono"])
-sr = 22000
 
+sr = 22000
 if source == "Subir archivo":
-    uploaded = st.file_uploader("Selecciona un WAV:", type="wav")
+    uploaded = st.file_uploader("Selecciona un archivo WAV:", type=['wav'])
     if not uploaded:
+        st.info("Por favor, sube un archivo WAV.")
         st.stop()
     data_bytes = uploaded.read()
-    with NamedTemporaryFile(delete=False, suffix=".wav") as tmpf:
+    filename = uploaded.name
+    with NamedTemporaryFile(delete=False, suffix='.wav') as tmpf:
         tmpf.write(data_bytes)
         path = tmpf.name
     sr, data = read_wav_file(path, sr)
-    st.audio(data_bytes, format="audio/wav")
-
-else:  # Grabar micrófono
-    # Si sd es None (p.ej. en Streamlit Cloud), avisamos y salimos
-    if sd is None:
-        st.warning("🔴 Grabación en vivo no disponible en este entorno.")
+    st.audio(data_bytes, format='audio/wav')
+else:
+    rec_duration = st.slider("Duración de grabación (s)", min_value=1, max_value=30, value=5)
+    if st.button("📢 Grabar desde micrófono"):
+        rec = sd.rec(int(rec_duration * sr), samplerate=sr, channels=1, dtype='float32')
+        sd.wait()
+        data = rec.flatten()
+        data_bytes = audio_segment_to_wav_bytes(data, sr)
+        filename = f"grabacion_{int(datetime.now().timestamp())}.wav"
+        st.audio(data_bytes, format='audio/wav')
+    else:
         st.stop()
 
-    rec_dur = st.slider("Duración grabación (s)", 1, 30, 5)
-    if not st.button("Grabar"):
-        st.stop()
-    # Grabar desde el micrófono
-    rec = sd.rec(int(rec_dur * sr), samplerate=sr, channels=1, dtype="float32")
-    sd.wait()
-    data = rec.flatten()
-    # Convertir a bytes WAV
-    data_bytes = audio_segment_to_wav_bytes(data, sr)
-    filename = f"grab_{int(datetime.now().timestamp())}.wav"
-    st.audio(data_bytes, format="audio/wav")
 # --- Parámetros fijos ---
 window_sec = 5.0
 step_sec = 1.0
@@ -184,17 +146,10 @@ st.subheader('Resumen basado en probabilidades')
 st.table(df_prob)
 st.markdown("---")
 
-
-# ─── 7) Clasificación en 3-Grupos (Sano / Infecciosa / Obstructiva) ─────────
-st.markdown("---")
-st.subheader("Clasificación 3-Grupos (Sano / Infecciosa / Obstructiva)")
-
-# Aquí usamos EXACTAMENTE la función de inference.py
-grp3, probs3 = predict_group3_from_audio(data, sr)
-
-st.write("**Grupo:**", grp3)
-st.write("**Probabilidades:**")
-st.json(probs3)
+# --- 4) Índice de severidad ---
+st.subheader("Índice de severidad")
+severity = sum(max(r['Crackles'], r['Wheezes'], r['Both'])*window_sec for r in results)
+st.write(f"Severity score: {round(severity,3)}")
 
 # --- 5) Descargar Informe PDF ---
 st.subheader("Descargar Informe PDF")
@@ -207,97 +162,51 @@ def generate_pdf():
     pdf.cell(0,8,f'Paciente: {patient_id or "N/A"}', ln=1)
     pdf.cell(0,8,f'Fecha: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}', ln=1)
     pdf.ln(5)
-
-    pdf.set_font('Arial','B',14)
-    pdf.cell(0,8,'Mejor ventana (0-5s)', ln=1)
+    pdf.set_font('Arial','B',14); pdf.cell(0,8,'Mejor ventana (0-5s)', ln=1)
     pdf.set_font('Arial','',12)
     pdf.cell(0,6,f"{best_window['start']:.1f}-{best_window['end']:.1f}s -> {best_window['pred']}", ln=1)
     pdf.ln(5)
-
-    pdf.set_font('Arial','B',14)
-    pdf.cell(0,8,'Resumen global', ln=1)
+    pdf.set_font('Arial','B',14); pdf.cell(0,8,'Resumen global', ln=1)
     pdf.set_font('Arial','',12)
     for cls in class_names:
         pdf.cell(0,6,f"{cls}: {duration_per[cls]}s ({percent_per[cls]}%)", ln=1)
     pdf.ln(5)
-
-    # NUEVA SECCIÓN: Enfermedad detectada
-    pdf.set_font('Arial','B',14)
-    pdf.cell(0,8,'Clasificación 3-Grupos', ln=1)
-    pdf.set_font('Arial','',12)
-    pdf.cell(0,6,f"Enfermedad detectada: {grp3}", ln=1)
-    pdf.ln(5)
-
-    pdf.set_font('Arial','B',14)
-    pdf.cell(0,8,'Observaciones', ln=1)
-    pdf.set_font('Arial','',12)
-    pdf.multi_cell(0,6, notes or 'Ninguna')
-
+    pdf.set_font('Arial','B',14); pdf.cell(0,8,'Observaciones', ln=1)
+    pdf.set_font('Arial','',12); pdf.multi_cell(0,6, notes or 'Ninguna')
     return bytes(pdf.output(dest='S'))
 
-
 pdf_bytes = generate_pdf()
-st.download_button("Descargar Informe PDF", pdf_bytes, file_name=f"informe_{patient_id}.pdf", mime="application/pdf")
+st.download_button("Descargar Informe PDF", pdf_bytes, file_name="informe.pdf", mime="application/pdf")
 
 # --- 6) Guardar en SQLite y ver historial ---
 st.subheader("Guardar/Historial BBDD")
 patient_db = st.text_input("ID paciente para BBDD")
-
 if st.button("Guardar en BBDD"):
-    conn = sqlite3.connect('resultados.db')
-    cur = conn.cursor()
-
-    # 1) Crear tabla si no existe, incluyendo la columna 'disease'
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS resultados (
-            id INTEGER PRIMARY KEY,
-            timestamp TEXT,
-            source TEXT,
-            patient_id TEXT UNIQUE,
-            filename TEXT,
-            best_start REAL,
-            best_end REAL,
-            best_label TEXT,
-            summary TEXT,
-            disease TEXT
-        )
-    ''')
-
-    # 2) Insertar o avisar si ya existe ese paciente
-    cur.execute("SELECT COUNT(*) FROM resultados WHERE patient_id=?", (patient_db,))
+    conn = sqlite3.connect('results.db'); cur = conn.cursor()
+    cur.execute('''CREATE TABLE IF NOT EXISTS results (
+        id INTEGER PRIMARY KEY, timestamp TEXT, source TEXT, patient_id TEXT UNIQUE,
+        filename TEXT, best_start REAL, best_end REAL, best_label TEXT, summary TEXT
+    )''')
+    cur.execute("SELECT COUNT(*) FROM results WHERE patient_id=?", (patient_db,))
     if cur.fetchone()[0]:
         st.error("El ID de paciente ya existe.")
     else:
         cur.execute(
-            "INSERT INTO resultados "
-            "(timestamp, source, patient_id, filename, best_start, best_end, best_label, summary, disease) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
-            (
-                datetime.now().isoformat(),
-                source,
-                patient_db,
-                filename,
-                best_window['start'],
-                best_window['end'],
-                best_window['pred'],
-                json.dumps(results),
-                grp3           # aquí guardamos la enfermedad detectada
-            )
+            "INSERT INTO results (timestamp, source, patient_id, filename, best_start, best_end, best_label, summary) VALUES (?,?,?,?,?,?,?,?)",
+            (datetime.now().isoformat(), source, patient_db, filename,
+             best_window['start'], best_window['end'], best_window['pred'], json.dumps(results))
         )
-        conn.commit()
-        st.success("Guardado OK")
-
+        conn.commit(); st.success("Guardado OK")
     conn.close()
-
 if st.checkbox("Ver historial"):
-    conn = sqlite3.connect('resultados.db')
-    dfh = pd.read_sql_query('SELECT * FROM resultados', conn)
+    conn = sqlite3.connect('results.db')
+    dfh = pd.read_sql_query('SELECT * FROM results', conn)
     # Exportar historial a CSV
     csv = dfh.to_csv(index=False).encode('utf-8')
-    st.download_button("Exportar historial CSV", csv,
-                       file_name="historial.csv", mime="text/csv")
+    st.download_button("Exportar historial CSV", csv, file_name="historial.csv", mime="text/csv")
     st.dataframe(dfh)
     conn.close()
+
 
 # In[ ]:
 
