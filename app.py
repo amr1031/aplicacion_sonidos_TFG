@@ -237,7 +237,9 @@ def generate_pdf():
     pdf.set_font('Arial','',12)
     pdf.multi_cell(0,6, notes or 'Ninguna')
 
-    return bytes(pdf.output(dest='S'))
+    pdf_str = pdf.output(dest='S')
+    return pdf_str.encode('utf-8')
+
 
 
 pdf_bytes = generate_pdf()
