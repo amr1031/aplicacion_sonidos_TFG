@@ -238,7 +238,7 @@ def generate_pdf():
     pdf.multi_cell(0,6, notes or 'Ninguna')
 
     pdf_str = pdf.output(dest='S')
-    return pdf_str.encode('utf-8')
+    return pdf_str.encode('latin-1')
 
 
 
